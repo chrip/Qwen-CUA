@@ -38,6 +38,7 @@ class Settings:
     models: tuple[str, ...]
     default_model: str
     enable_thinking: bool
+    reasoning_effort: str
     max_tokens: int
     temperature: float
     top_p: float
@@ -77,6 +78,8 @@ class Settings:
             models=models,
             default_model=default_model,
             enable_thinking=_env_bool("QWEN_CUA_ENABLE_THINKING", True),
+            # Qwen3.8 family: "" leaves the server default in place.
+            reasoning_effort=os.getenv("QWEN_CUA_REASONING_EFFORT", "").strip(),
             max_tokens=_env_int("QWEN_CUA_MAX_TOKENS", 32768),
             temperature=_env_float("QWEN_CUA_TEMPERATURE", 0.6),
             top_p=_env_float("QWEN_CUA_TOP_P", 0.95),

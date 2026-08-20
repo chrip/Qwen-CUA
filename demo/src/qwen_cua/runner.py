@@ -50,6 +50,7 @@ from .protocol import (
     redact_tool_text,
     repair_instruction,
 )
+from .verty import VertyClient, VertySettings, VertyVerdict
 from .safety import (
     SafetyIntervention,
     classify_sensitive_action,
@@ -75,11 +76,24 @@ class AgentHistory:
     responses: list[str] = field(default_factory=list)
     action_summaries: list[str] = field(default_factory=list)
     feedback: dict[int, str] = field(default_factory=dict)
+    # Frames whose transition a cheap visual check confirmed was the expected
+    # outcome of the action, with a one-line description of what changed. Such a
+    # frame can be folded to that text instead of shipped as an image: the model
+    # already knows what it was going to look like, because it asked for it and
+    # the pixels agree.
+    #
+    # The NEWEST frame is never folded, whatever its verdict -- it is the state
+    # the model has to act on next.
+    foldable: dict[int, str] = field(default_factory=dict)
 
-    def add_screenshot(self, payload: bytes, feedback: str = "") -> None:
+    def add_screenshot(self, payload: bytes, feedback: str = "",
+                       foldable: str = "") -> None:
         self.screenshots.append(_process_image(payload))
+        index = len(self.screenshots) - 1
         if feedback:
-            self.feedback[len(self.screenshots) - 1] = feedback
+            self.feedback[index] = feedback
+        if foldable:
+            self.foldable[index] = foldable
 
     def add_response(self, response: str, actions: list[ComputerAction]) -> None:
         self.responses.append(response)
@@ -121,6 +135,9 @@ class AgentHistory:
                 )
             if index < collapsed_before:
                 content.append({"type": "text", "text": COLLAPSED_SCREENSHOT_TEXT})
+            elif index < total - 1 and index in self.foldable:
+                content.append({"type": "text",
+                                "text": f"{COLLAPSED_SCREENSHOT_TEXT} {self.foldable[index]}"})
             else:
                 content.append(
                     {
@@ -172,6 +189,10 @@ class RunnerManager:
         self.runs: dict[str, RunContext] = {}
         self._lock = asyncio.Lock()
         self.settings.data_root.mkdir(parents=True, exist_ok=True)
+        # Optional cheap visual guard between chained actions. Disabled unless
+        # QWEN_CUA_VERTY_URL is set; with it unset the runner behaves exactly as
+        # it did before.
+        self.verty = VertyClient(VertySettings.from_env())
 
     async def close(self) -> None:
         tasks = [context.task for context in self.runs.values() if context.task]
@@ -181,6 +202,7 @@ class RunnerManager:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await self.model_client.close()
+        await self.verty.aclose()
 
     def models(self) -> list[ModelInfo]:
         return [
@@ -449,18 +471,64 @@ class RunnerManager:
                     message="Model response received.",
                     detail=redact_tool_text(response),
                 )
+                # Token accounting per model turn. Half of what the efficiency
+                # experiment measures is cost, and cost is tokens, not turns.
+                usage = getattr(self.model_client, "last_usage", None)
+                if usage:
+                    await self._emit(
+                        context,
+                        type_="model_usage",
+                        level=EventLevel.OK,
+                        message=(f"Tokens: {usage.get('prompt_tokens', 0)} prompt / "
+                                 f"{usage.get('completion_tokens', 0)} completion"),
+                        detail=dict(usage),
+                    )
                 history.add_response(response, actions)
                 if not actions:
+                    # Distinguish "the model decided to stop" from "the model was
+                    # cut off before it could act". Both arrive here as a message
+                    # with no tool call, and only one of them is a real ending.
+                    truncated = getattr(self.model_client, "last_finish_reason", None) == "length"
+
+                    # A cut-off turn is the model failing to answer, not choosing
+                    # to stop. Ending the run there throws away a task that was
+                    # going fine -- measured: it killed 5 of 8 experiment runs
+                    # across two configurations. Tell it what went wrong, capture
+                    # the current screen, and give it the next turn.
+                    if truncated:
+                        await self._emit(
+                            context,
+                            type_="model_truncated",
+                            level=EventLevel.ERROR,
+                            message=(f"Model hit the {self.settings.max_tokens}-token "
+                                     f"budget without emitting a tool call; retrying."),
+                            detail={"max_tokens": self.settings.max_tokens},
+                        )
+                        recovery = await self._capture(context, f"turn-{turn}-truncated")
+                        history.add_screenshot(
+                            recovery.payload,
+                            feedback=(
+                                "Your previous response was cut off before it contained a "
+                                "tool call, so nothing was executed. Reply with exactly one "
+                                "<tool_call> block and no other text."
+                            ),
+                        )
+                        continue
+
+                    note = (
+                        "Model returned a final assistant message."
+                    )
                     await self._complete_from_current_state(
                         context,
                         requested_outcome=None,
-                        note="Model returned a final assistant message.",
+                        note=note,
                     )
                     return
 
                 terminal: TerminateAction | None = None
                 last_screenshot: Screenshot | None = None
                 feedback_parts: list[str] = []
+                turn_fold: str = ""   # set when the turn ended in a verified state
                 for action in actions:
                     if isinstance(action, CallUserAction):
                         answer = await self._await_user_input(context, action)
@@ -492,18 +560,42 @@ class RunnerManager:
                         message=f"Action requested: {action.action}",
                         detail=public_action,
                     )
-                    if safety is not None:
-                        resolution = await self._await_approval(context, safety)
-                        if resolution["decision"] != "approve":
-                            raise RunRejectedError("Operator rejected a sensitive action.")
-                        if safety.kind == "file_upload":
-                            file_path = Path(str(resolution["file_path"]))
-                            await computer.set_input_file(safety.element_ref, file_path)
+                    # A model can emit an action the browser refuses -- a key spec
+                    # like "Down Down Enter", a coordinate outside the viewport.
+                    # That is the model being wrong, not the run being over: an
+                    # agent that cannot survive its own malformed actions will
+                    # never finish a long task. Report it back and let the model
+                    # decide again, the same way a guard stop does.
+                    try:
+                        if safety is not None:
+                            resolution = await self._await_approval(context, safety)
+                            if resolution["decision"] != "approve":
+                                raise RunRejectedError("Operator rejected a sensitive action.")
+                            if safety.kind == "file_upload":
+                                file_path = Path(str(resolution["file_path"]))
+                                await computer.set_input_file(safety.element_ref, file_path)
+                            else:
+                                await computer.execute(action)
                         else:
                             await computer.execute(action)
-                    else:
-                        await computer.execute(action)
+                    except (RunRejectedError, asyncio.CancelledError):
+                        raise
+                    except Exception as exc:
+                        message = f"{type(exc).__name__}: {exc}".split("\n")[0][:300]
+                        await self._emit(
+                            context,
+                            type_="action_rejected",
+                            level=EventLevel.ERROR,
+                            message=f"Action rejected by the browser: {message}",
+                            detail={"action": public_action, "error": message},
+                        )
+                        feedback_parts.append(
+                            f"The {action.action} action was rejected: {message}. "
+                            f"It was not performed. Choose a different action."
+                        )
+                        break
                     context.action_count += 1
+                    before_path = self._screenshot_path(context, -1)
                     last_screenshot = await self._capture(
                         context,
                         f"turn-{turn}-action-{context.action_count}",
@@ -518,6 +610,17 @@ class RunnerManager:
                         screenshot_id=context.detail.screenshots[-1].id,
                     )
 
+                    # ── Verty guard ──────────────────────────────────────────
+                    # The model planned this whole chain against the screen it
+                    # saw at the start of the turn. Check the assumption held
+                    # before running the next link.
+                    guard, turn_fold = await self._verty_check(
+                        context, action, public_action, before_path
+                    )
+                    if guard is not None:
+                        feedback_parts.append(guard)
+                        break
+
                 if terminal is not None:
                     await self._complete_from_current_state(
                         context,
@@ -530,6 +633,7 @@ class RunnerManager:
                 history.add_screenshot(
                     last_screenshot.payload,
                     feedback="\n".join(feedback_parts),
+                    foldable=turn_fold if self.verty.settings.fold else "",
                 )
 
             await self._fail(
@@ -649,6 +753,121 @@ class RunnerManager:
             message="Run failed.",
             detail=message,
         )
+
+    async def _verty_check(
+        self,
+        context: RunContext,
+        action: ComputerAction,
+        public_action: dict[str, Any],
+        before_path: str | None,
+    ) -> tuple[str | None, str]:
+        """Cheap visual check after one executed action.
+
+        Returns (stop_feedback, fold_text):
+          stop_feedback  text to give the model, and stop the chain; None to continue
+          fold_text      a one-line description of a VERIFIED transition, which
+                         lets the resulting frame be folded to text in later
+                         turns instead of shipped as an image
+        """
+        if not self.verty.settings.enabled or before_path is None:
+            return None, ""
+        after_path = self._screenshot_path(context, -1)
+        if after_path is None or after_path == before_path:
+            return None, ""
+
+        coord = public_action.get("coordinate")
+        x = y = None
+        if isinstance(coord, (list, tuple)) and len(coord) == 2:
+            shot = context.detail.screenshots[-1]
+            # The protocol's 0..999 grid -> frame pixels, which is what the
+            # verifier measures in.
+            x = int(round(float(coord[0]) / 1000.0 * shot.width))
+            y = int(round(float(coord[1]) / 1000.0 * shot.height))
+        pixels = public_action.get("pixels")
+        # computer.py executes scroll as wheel(0, -pixels), so a positive
+        # `pixels` scrolls the view UP, which is a negative dy for the verifier.
+        dy = -int(pixels) if isinstance(pixels, (int, float)) and action.action == "scroll" else None
+
+        verdict = await self.verty.check(
+            session=context.detail.id,
+            before=before_path,
+            after=after_path,
+            action=str(public_action.get("action", "")),
+            x=x, y=y, dy=dy,
+            text=public_action.get("text") if isinstance(public_action.get("text"), str) else None,
+        )
+        if verdict is None:
+            return None, ""
+
+        detail = {
+            "verdict": verdict.verdict,
+            "extent": verdict.extent,
+            "reason": verdict.reason,
+            "external_change": verdict.external_change,
+            "no_novel_run": verdict.no_novel_run,
+            "ms": verdict.ms,
+        }
+        await self._emit(
+            context,
+            type_="verty_check",
+            level=EventLevel.OK if verdict.verdict != "unexpected" else EventLevel.PENDING,
+            message=f"Visual check: {verdict.verdict} ({verdict.reason})",
+            detail=detail,
+        )
+
+        # A transition the check confirms was the action's expected outcome, with
+        # nothing unexplained alongside it, needs no image in later turns.
+        fold = ""
+        if verdict.verdict == "expected" and not verdict.external_change:
+            fold = (f"Verified: {public_action.get('action')} produced its expected "
+                    f"result ({verdict.reason}).")
+
+        if not self.verty.settings.guard:
+            return None, fold
+
+        # (1) The action demonstrably did not do what it should have. Every
+        # later link in the chain was planned assuming it did.
+        if verdict.contradicts_action:
+            await self._emit(
+                context,
+                type_="verty_guard_stop",
+                level=EventLevel.PENDING,
+                message=f"Chain stopped: {verdict.reason}",
+                detail=detail,
+            )
+            return (
+                f"A visual check found that {public_action.get('action')} did not take "
+                f"effect: {verdict.reason}. Remaining planned actions were skipped "
+                f"because they assumed it had. Look at the current screenshot and "
+                f"decide again."
+            ), ""
+
+        # (2) Nothing new has appeared for several steps. Change is still
+        # happening -- focus rings, carets -- but the screen keeps showing states
+        # it has shown before, which is what going in circles looks like.
+        run = self.verty.settings.stuck_run
+        if run and verdict.no_novel_run >= run:
+            await self._emit(
+                context,
+                type_="verty_guard_stop",
+                level=EventLevel.PENDING,
+                message=f"Chain stopped: {verdict.no_novel_run} steps with no new content",
+                detail=detail,
+            )
+            return (
+                f"A visual check found that the last {verdict.no_novel_run} actions "
+                f"produced no content that had not already been on screen. The "
+                f"current approach is not making progress; try a different one."
+            ), ""
+
+        return None, fold
+
+    def _screenshot_path(self, context: RunContext, index: int = -1) -> str | None:
+        """On-disk path of a captured screenshot. verty-serve reads paths, not bodies."""
+        shots = context.detail.screenshots
+        if not shots or abs(index) > len(shots):
+            return None
+        return str(context.run_dir / "screenshots" / f"{shots[index].sequence:04d}.png")
 
     async def _capture(
         self,
