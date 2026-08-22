@@ -1,0 +1,15 @@
+:root { --ink:#1b1f27; --muted:#6b7280; --line:#d7dbe2; --ok:#1f7a4d; --bg:#f6f7f9; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:640px; margin:0 auto; padding:40px 28px; }
+h1 { font-size:1.6rem; margin:0 0 6px; letter-spacing:-.01em; }
+.hint { color:var(--muted); margin:0 0 28px; }
+ul { list-style:none; margin:0; padding:0; }
+li.item { background:#fff; border:1px solid var(--line); border-radius:8px;
+  padding:16px 18px; margin:0 0 12px; display:flex; align-items:center; gap:14px; }
+li.item label { display:flex; align-items:center; gap:14px; cursor:pointer; width:100%; }
+input[type=checkbox] { width:22px; height:22px; accent-color:var(--ok); cursor:pointer; }
+.note { background:#e8f4ee; border:1px solid #bcdccb; color:var(--ok);
+  border-radius:8px; padding:12px 18px; margin:0 0 12px; font-size:.94rem; }
+.done { margin-top:24px; font-weight:600; color:var(--ok); }

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Release Checklist · Qwen CUA Lab</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <h1>Release Checklist</h1>
+    <p class="hint">Tick every item in the checklist.</p>
+
+    <!-- Ticking an item inserts a confirmation note directly beneath it, which
+         pushes every item below it further down the page. A plan built from the
+         first screenshot therefore holds stale coordinates for items 2..n the
+         moment item 1 is ticked. That displacement is the whole point of this
+         lab: it is deterministic, it is measurable, and it is exactly the case
+         a plan-aware tracker has to survive. -->
+    <ul id="list"></ul>
+
+    <p id="done" class="done" hidden>All items checked.</p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

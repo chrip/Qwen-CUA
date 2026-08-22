@@ -72,6 +72,7 @@ class AgentHistory:
     prompt: str
     history_n: int
     image_max: int
+    allow_batch: bool = False
     screenshots: list[str] = field(default_factory=list)
     responses: list[str] = field(default_factory=list)
     action_summaries: list[str] = field(default_factory=list)
@@ -119,7 +120,8 @@ class AgentHistory:
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": build_system_prompt()}],
+                "content": [{"type": "text",
+                             "text": build_system_prompt(self.allow_batch)}],
             }
         ]
         for index in range(start, total):
@@ -397,6 +399,7 @@ class RunnerManager:
             prompt=context.detail.prompt,
             history_n=self.settings.history_n,
             image_max=self.settings.image_max,
+            allow_batch=self.settings.allow_batch,
         )
         trusted_scenario = context.detail.scenario_id is not None
         computer = self.computer_factory(
@@ -736,6 +739,23 @@ class RunnerManager:
         )
 
     async def _fail(self, context: RunContext, message: str) -> None:
+        # Capture whatever the lab knows before tearing the run down. A run that
+        # exhausts its turn budget never reaches verification, so any state the
+        # lab was recording -- for an experiment, that is often the ground truth
+        # the run existed to produce -- would otherwise be lost with the browser.
+        try:
+            if context.computer is not None:
+                lab_state = await context.computer.read_lab_state()
+                if lab_state:
+                    await self._emit(
+                        context,
+                        type_="lab_state",
+                        level=EventLevel.OK,
+                        message="Lab state captured before failure.",
+                        detail=lab_state,
+                    )
+        except Exception:
+            pass
         context.detail.status = RunStatus.FAILED
         context.detail.completed_at = _now()
         context.detail.summary = RunSummary(

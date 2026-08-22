@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Deploy Checklist · Qwen CUA Lab</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <div class="col">
+      <h1>Deploy Checklist</h1>
+      <p class="hint">Tick every item.</p>
+      <ul id="list"></ul>
+      <p id="done" class="done" hidden>All items checked.</p>
+    </div>
+
+    <!-- An activity feed that appends entries on a timer, with no relation to
+         anything the agent does. This is the whole point of the lab: it produces
+         visual change the agent did not cause, at times the agent does not
+         control, and it records exactly when it did so. That log is the ground
+         truth an `external_change` detector can be scored against -- otherwise
+         the signal is only ever judged against intuition. -->
+    <aside class="col feed">
+      <h2>Activity</h2>
+      <ul id="feed"></ul>
+    </aside>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

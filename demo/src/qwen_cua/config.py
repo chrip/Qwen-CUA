@@ -39,6 +39,7 @@ class Settings:
     default_model: str
     enable_thinking: bool
     reasoning_effort: str
+    allow_batch: bool
     max_tokens: int
     temperature: float
     top_p: float
@@ -80,6 +81,9 @@ class Settings:
             enable_thinking=_env_bool("QWEN_CUA_ENABLE_THINKING", True),
             # Qwen3.8 family: "" leaves the server default in place.
             reasoning_effort=os.getenv("QWEN_CUA_REASONING_EFFORT", "").strip(),
+            # Permit more than one tool call per model turn. Off by default:
+            # that reproduces the upstream prompt exactly.
+            allow_batch=_env_bool("QWEN_CUA_ALLOW_BATCH", False),
             max_tokens=_env_int("QWEN_CUA_MAX_TOKENS", 32768),
             temperature=_env_float("QWEN_CUA_TEMPERATURE", 0.6),
             top_p=_env_float("QWEN_CUA_TOP_P", 0.95),

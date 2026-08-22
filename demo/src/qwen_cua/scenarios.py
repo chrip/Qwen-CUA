@@ -26,6 +26,45 @@ SCENARIOS = (
         tags=["drag-drop", "productivity", "verification"],
     ),
     ScenarioManifest(
+        id="shifting-checklist",
+        title="Release Checklist",
+        description=(
+            "Tick three checkboxes; each tick pushes the remaining ones further "
+            "down the page."
+        ),
+        default_prompt=(
+            "Tick every item in the Release Checklist, then terminate successfully."
+        ),
+        lab_path="shifting/index.html",
+        tags=["clicking", "moving-targets", "verification"],
+    ),
+    ScenarioManifest(
+        id="interrupted-checklist",
+        title="Deploy Checklist",
+        description=(
+            "Tick four checkboxes while an activity feed updates on its own timer."
+        ),
+        default_prompt=(
+            "Tick every item in the Deploy Checklist, then terminate successfully. "
+            "Ignore the Activity feed on the right; it updates by itself."
+        ),
+        lab_path="interrupted/index.html",
+        tags=["clicking", "external-change", "verification"],
+    ),
+    ScenarioManifest(
+        id="quiet-checklist",
+        title="Deploy Checklist (quiet)",
+        description=(
+            "The Deploy Checklist with its activity feed frozen -- the control "
+            "for whether self-changing content degrades the agent itself."
+        ),
+        default_prompt=(
+            "Tick every item in the Deploy Checklist, then terminate successfully."
+        ),
+        lab_path="interrupted/index.html?quiet=1",
+        tags=["clicking", "control", "verification"],
+    ),
+    ScenarioManifest(
         id="registration-complete",
         title="Summit Registration",
         description="Complete and submit a multi-step event registration form.",
@@ -55,6 +94,29 @@ def get_scenario(scenario_id: str) -> ScenarioManifest | None:
 def verify_scenario(scenario_id: str, state: dict[str, Any] | None) -> VerificationResult:
     if state is None:
         return VerificationResult(False, "The lab did not expose a verification state.")
+    if scenario_id in ("interrupted-checklist", "quiet-checklist"):
+        checked = state.get("checked") or {}
+        if not checked:
+            return VerificationResult(False, "The lab exposed no checklist state.")
+        missing = [k for k, ok in checked.items() if not ok]
+        # Carry the injection timestamps into the run record. They are the
+        # ground truth an external-change detector is scored against, and the
+        # verification detail is the only channel that survives into run.json.
+        stamps = [int(x.get("at", 0)) for x in (state.get("injections") or [])]
+        detail = f"injections={len(stamps)} at={stamps}"
+        if missing:
+            return VerificationResult(False, f"unchecked={sorted(missing)}; {detail}")
+        return VerificationResult(True, f"all checked; {detail}")
+    if scenario_id == "shifting-checklist":
+        checked = state.get("checked") or {}
+        missing = [k for k, v in checked.items() if not v]
+        if not checked:
+            return VerificationResult(False, "The lab exposed no checklist state.")
+        if missing:
+            return VerificationResult(False, f"unchecked={sorted(missing)}")
+        return VerificationResult(
+            True, f"all checked; observed shift={state.get('shifted')}"
+        )
     if scenario_id == "kanban-reprioritize":
         expected_columns: dict[str, Any] = {
             "backlog": ["release-notes"],

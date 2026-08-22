@@ -95,7 +95,20 @@ def build_tool_definition() -> dict[str, Any]:
     }
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(allow_batch: bool = False) -> str:
+    """System prompt for the computer_use protocol.
+
+    `allow_batch` decides whether the model is permitted to emit more than one
+    tool call per turn. It defaults to False, which reproduces the upstream
+    instruction exactly.
+
+    This is a flag rather than a fixed choice because the upstream wording --
+    "You may reason before the function call, but never write anything after
+    it" -- forbids a second tool call, even though the parser accepts many and
+    the documentation advertises them. Measured on this stack, the model obeyed
+    it in 360 of 360 turns: not one emitted a plan. Whether that is the model or
+    the prompt is exactly the question, so both wordings have to be runnable.
+    """
     tool_json = json.dumps(build_tool_definition(), ensure_ascii=False)
     return (
         "You are a multi-purpose intelligent assistant. Based on the user's request, "
@@ -114,13 +127,25 @@ def build_system_prompt() -> str:
         "- Function calls must contain an inner <function=computer_use> block inside "
         "<tool_call> tags.\n"
         "- Include every parameter required by the chosen action.\n"
-        "- You may reason before the function call, but never write anything after it.\n"
-        f"- The current date is {date.today().isoformat()}.\n"
-        f"- Collapsed screenshots appear as text: {COLLAPSED_SCREENSHOT_TEXT}\n"
-        "- Interact through the visible GUI only. Do not use page scripts, a terminal, "
-        "developer tools, browser automation APIs, or hidden application state.\n"
-        "- Verify the visible result before terminating with success.\n"
-        "</IMPORTANT>"
+        + (
+            "- You may reason before the function calls. When the next few steps "
+            "are already determined by what is on screen -- filling fields whose "
+            "positions you can see, or clicking several visible items -- emit "
+            "SEVERAL <tool_call> blocks in one reply, in the order they should "
+            "run. Emit only one when the next step depends on what the previous "
+            "one produces. Write nothing after the last tool call.\n"
+            if allow_batch else
+            "- You may reason before the function call, but never write anything after it.\n"
+        )
+        + (
+            f"- The current date is {date.today().isoformat()}.\n"
+            f"- Collapsed screenshots appear as text: {COLLAPSED_SCREENSHOT_TEXT}\n"
+            "- Interact through the visible GUI only. Do not use page scripts, a "
+            "terminal, developer tools, browser automation APIs, or hidden "
+            "application state.\n"
+            "- Verify the visible result before terminating with success.\n"
+            "</IMPORTANT>"
+        )
     )
 
 
