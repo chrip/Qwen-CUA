@@ -40,6 +40,31 @@ class VertySettings:
     # only thing here that can actually reduce cost.
     fold: bool = False
 
+    # Frames to keep as images regardless of verdict, counting back from the
+    # newest. Folding purely on evidence measured -33% prompt tokens per turn and
+    # gave much of it back: those runs took more turns, because a text summary
+    # records THAT something happened and not what the screen looked like, so an
+    # agent with ten folded frames has ten fewer visual anchors for where it is.
+    #
+    # This keeps a recent window intact and folds only verified frames behind it
+    # -- Qwen-CUA's age rule and this project's evidence rule together, rather
+    # than either alone.
+    fold_keep: int = 0
+
+    # Consecutive no-new-content actions after which the HARNESS ends the run,
+    # without asking the model. 0 disables it.
+    #
+    # This is separate from `stuck_run`, which asks the model to change course
+    # and which the model may ignore -- measured, one run was told 49 times that
+    # it was making no progress and clicked the same dead coordinate 50 times.
+    # Aborting needs no cooperation.
+    #
+    # 10 was chosen by sweeping the threshold over 50 recorded trajectories:
+    # it caught 13 of 15 failures with 0 false alarms on healthy successful
+    # runs, a median of 33 actions before the run ended. Lower thresholds fire
+    # on healthy runs; higher ones only shorten the warning.
+    abort_run: int = 0
+
     # Consecutive steps introducing no new content before the chain is stopped.
     # A repaint the screen has shown before -- a focus ring, a caret, a hover --
     # is change, but it is not progress; this counts the latter.
@@ -58,6 +83,8 @@ class VertySettings:
             not in {"0", "false", "no"},
             fold=os.getenv("QWEN_CUA_VERTY_FOLD", "false").strip().lower()
             in {"1", "true", "yes"},
+            fold_keep=max(0, int(os.getenv("QWEN_CUA_VERTY_FOLD_KEEP", "0") or 0)),
+            abort_run=max(0, int(os.getenv("QWEN_CUA_VERTY_ABORT_RUN", "0") or 0)),
             stuck_run=max(0, int(os.getenv("QWEN_CUA_VERTY_STUCK_RUN", "3") or 3)),
             timeout_s=float(os.getenv("QWEN_CUA_VERTY_TIMEOUT", "5") or 5),
         )

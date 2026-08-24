@@ -67,12 +67,18 @@ class RunRejectedError(RuntimeError):
     pass
 
 
+class RunAbortedError(RuntimeError):
+    """The harness ended the run on visual evidence, without the model's assent."""
+
+
 @dataclass(slots=True)
 class AgentHistory:
     prompt: str
     history_n: int
     image_max: int
     allow_batch: bool = False
+    # Never fold the newest `fold_keep` frames, whatever their verdict.
+    fold_keep: int = 0
     screenshots: list[str] = field(default_factory=list)
     responses: list[str] = field(default_factory=list)
     action_summaries: list[str] = field(default_factory=list)
@@ -137,7 +143,7 @@ class AgentHistory:
                 )
             if index < collapsed_before:
                 content.append({"type": "text", "text": COLLAPSED_SCREENSHOT_TEXT})
-            elif index < total - 1 and index in self.foldable:
+            elif (index < total - 1 - self.fold_keep) and index in self.foldable:
                 content.append({"type": "text",
                                 "text": f"{COLLAPSED_SCREENSHOT_TEXT} {self.foldable[index]}"})
             else:
@@ -400,6 +406,7 @@ class RunnerManager:
             history_n=self.settings.history_n,
             image_max=self.settings.image_max,
             allow_batch=self.settings.allow_batch,
+            fold_keep=self.verty.settings.fold_keep,
         )
         trusted_scenario = context.detail.scenario_id is not None
         computer = self.computer_factory(
@@ -661,6 +668,12 @@ class RunnerManager:
                 message="Run cancelled.",
             )
             raise
+        except RunAbortedError as exc:
+            # A harness-ended run is a failure, and should read as one -- but it
+            # is a diagnosed failure, not an unexplained one, so the reason
+            # travels with it.
+            await self._fail(context, str(exc))
+            return
         except RunRejectedError as exc:
             context.detail.status = RunStatus.CANCELLED
             context.detail.completed_at = _now()
@@ -861,6 +874,24 @@ class RunnerManager:
                 f"because they assumed it had. Look at the current screenshot and "
                 f"decide again."
             ), ""
+
+        # (0) Hopeless: end the run outright. The model has been told and has not
+        # changed course, so asking again only spends more of the budget. The
+        # harness does not need its agreement to stop.
+        abort = self.verty.settings.abort_run
+        if abort and verdict.no_novel_run >= abort:
+            await self._emit(
+                context,
+                type_="verty_abort",
+                level=EventLevel.ERROR,
+                message=(f"Run aborted: {verdict.no_novel_run} consecutive actions "
+                         f"produced no content that had not already been on screen."),
+                detail=detail,
+            )
+            raise RunAbortedError(
+                f"Visual state loop: {verdict.no_novel_run} consecutive actions "
+                f"introduced no new content."
+            )
 
         # (2) Nothing new has appeared for several steps. Change is still
         # happening -- focus rings, carets -- but the screen keeps showing states
